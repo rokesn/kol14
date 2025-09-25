@@ -37,7 +37,6 @@ export interface TokenResult {
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
-const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
 
 // Helper to create raw instructions without buffer dependencies
 function createRawInstruction(
@@ -82,91 +81,7 @@ function bigIntPower(base: bigint, exponent: number): bigint {
   return result;
 }
 
-// Helper to create metadata PDA
-async function getMetadataPDA(mint: PublicKey): Promise<PublicKey> {
-  const [metadataAddress] = await PublicKey.findProgramAddress(
-    [
-      Buffer.from('metadata'),
-      METADATA_PROGRAM_ID.toBytes(),
-      mint.toBytes(),
-    ],
-    METADATA_PROGRAM_ID
-  );
-  return metadataAddress;
-}
-
-// Helper to encode string with length prefix
-function encodeString(str: string): Uint8Array {
-  const encoded = new TextEncoder().encode(str);
-  const lengthBytes = numberToLEBytes(encoded.length, 4);
-  const result = new Uint8Array(4 + encoded.length);
-  result.set(lengthBytes);
-  result.set(encoded, 4);
-  return result;
-}
-
-// Helper to create metadata instruction
-function createMetadataInstruction(
-  mint: PublicKey,
-  metadataAddress: PublicKey,
-  payer: PublicKey,
-  tokenData: TokenCreationData
-): TransactionInstruction {
-  // Create metadata instruction data
-  const nameData = encodeString(tokenData.name);
-  const symbolData = encodeString(tokenData.symbol);
-  const uriData = encodeString(tokenData.description || '');
-  
-  // Calculate total size needed
-  const baseSize = 1 + 32 + 32 + nameData.length + symbolData.length + uriData.length + 2 + 1 + 1 + 4;
-  const data = new Uint8Array(baseSize);
-  let offset = 0;
-  
-  // Instruction discriminator (0 = CreateMetadataAccountV3)
-  data[offset] = 0;
-  offset += 1;
-  
-  // Name
-  data.set(nameData, offset);
-  offset += nameData.length;
-  
-  // Symbol  
-  data.set(symbolData, offset);
-  offset += symbolData.length;
-  
-  // URI
-  data.set(uriData, offset);
-  offset += uriData.length;
-  
-  // Seller fee basis points (0)
-  data.set(numberToLEBytes(0, 2), offset);
-  offset += 2;
-  
-  // Update authority present (1)
-  data[offset] = 1;
-  offset += 1;
-  
-  // Is mutable (1)
-  data[offset] = 1;
-  offset += 1;
-  
-  // Collection details (0 = None)
-  data.set(numberToLEBytes(0, 4), offset);
-  
-  return createRawInstruction(
-    METADATA_PROGRAM_ID,
-    [
-      { pubkey: metadataAddress, isSigner: false, isWritable: true }, // metadata
-      { pubkey: mint, isSigner: false, isWritable: false }, // mint
-      { pubkey: payer, isSigner: true, isWritable: false }, // mint authority
-      { pubkey: payer, isSigner: true, isWritable: true }, // payer
-      { pubkey: payer, isSigner: false, isWritable: false }, // update authority
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system program
-      { pubkey: new PublicKey('SysvarRent111111111111111111111111111111111'), isSigner: false, isWritable: false }, // rent
-    ],
-    data
-  );
-}
+// Metadata functionality temporarily disabled - will be implemented separately
 
 export async function createSolanaToken(
   tokenData: TokenCreationData,
@@ -314,10 +229,8 @@ export async function createSolanaToken(
           initMintData
         ));
         
-        // Create metadata account for the token
-        const metadataAddress = await getMetadataPDA(mint);
-        console.log(`Metadata address: ${metadataAddress.toString()}`);
-        transaction.add(createMetadataInstruction(mint, metadataAddress, payer, tokenData));
+        // TODO: Add metadata creation in separate transaction to ensure token creation succeeds
+        console.log('Token creation proceeding without metadata - will be added separately');
         
         // Create Associated Token Account instruction (raw) - Made idempotent
         transaction.add(createRawInstruction(
