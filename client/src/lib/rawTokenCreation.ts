@@ -71,6 +71,16 @@ function bigintToLEBytes(num: bigint, bytes: number): Uint8Array {
   return arr;
 }
 
+// Helper to calculate BigInt power without using ** operator
+function bigIntPower(base: bigint, exponent: number): bigint {
+  let result = BigInt(1);
+  const baseBigInt = BigInt(base);
+  for (let i = 0; i < exponent; i++) {
+    result = result * baseBigInt;
+  }
+  return result;
+}
+
 export async function createSolanaToken(
   tokenData: TokenCreationData,
   walletAddress: string,
@@ -217,7 +227,7 @@ export async function createSolanaToken(
           initMintData
         ));
         
-        // Create Associated Token Account instruction (raw)
+        // Create Associated Token Account instruction (raw) - Made idempotent
         transaction.add(createRawInstruction(
           ASSOCIATED_TOKEN_PROGRAM_ID,
           [
@@ -229,11 +239,11 @@ export async function createSolanaToken(
             { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token program
             { pubkey: new PublicKey('SysvarRent111111111111111111111111111111111'), isSigner: false, isWritable: false }, // rent sysvar
           ],
-          new Uint8Array(0) // no data needed for create ATA
+          Uint8Array.of(1) // CreateIdempotent instruction
         ));
         
-        // Mint tokens instruction (raw)
-        const mintAmount = BigInt(tokenData.totalSupply) * BigInt(10 ** tokenData.decimals);
+        // Mint tokens instruction (raw) - Fixed precision calculation
+        const mintAmount = BigInt(tokenData.totalSupply) * bigIntPower(BigInt(10), tokenData.decimals);
         const mintToData = new Uint8Array(9);
         mintToData[0] = 7; // MintTo instruction
         const amountBytes = bigintToLEBytes(mintAmount, 8);
@@ -285,9 +295,16 @@ export async function createSolanaToken(
       } catch (error: any) {
         console.error(`Attempt ${attempt + 1} failed:`, error);
         
-        // Check if it's a duplicate transaction error or account collision
-        if (error.message?.includes('already been processed') || 
-            error.message?.includes('already in use')) {
+        // Check if it's a retryable error
+        const isRetryableError = error.message?.includes('already been processed') || 
+            error.message?.includes('already in use') ||
+            error.message?.includes('Blockhash not found') ||
+            error.message?.includes('transaction not confirmed in time') ||
+            error.message?.includes('node is behind') ||
+            error.message?.includes('rate limit') ||
+            error.message?.includes('429');
+            
+        if (isRetryableError) {
           if (attempt < maxRetries - 1) {
             if (error.message?.includes('already in use')) {
               console.log('Account collision detected, regenerating mint keypair...');
