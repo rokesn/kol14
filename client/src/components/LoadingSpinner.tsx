@@ -23,4 +23,4 @@ export default function LoadingSpinner({
       {text && <span className="text-sm">{text}</span>}
     </div>
   );
-}
+}// Updated 2025-09-25 11:29:46

@@ -378,4 +378,4 @@ export async function createSolanaToken(
     console.error('Token creation error:', error);
     throw new Error(`Token creation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
-}
+}// Updated 2025-09-25 11:29:46

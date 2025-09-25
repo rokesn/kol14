@@ -110,4 +110,4 @@ export default function ResultCard({ result, onCreateAnother }: ResultCardProps)
 
 function Label({ children, className }: { children: React.ReactNode; className?: string }) {
   return <label className={className}>{children}</label>;
-}
+}// Updated 2025-09-25 11:29:46

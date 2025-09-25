@@ -8,4 +8,4 @@ export default function LoadingSpinnerExample() {
       <LoadingSpinner size="lg" text="Uploading metadata..." />
     </div>
   );
-}
+}// Updated 2025-09-25 11:29:46

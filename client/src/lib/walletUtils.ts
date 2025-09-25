@@ -91,4 +91,4 @@ export async function autoConnectWallet(): Promise<{ address: string; type: stri
     }
     throw new Error(`Failed to connect to ${selectedWallet.name} wallet`);
   }
-}
+}// Updated 2025-09-25 11:29:46
