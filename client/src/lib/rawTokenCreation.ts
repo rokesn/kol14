@@ -115,10 +115,41 @@ export async function createSolanaToken(
       }
     }
     
-    // 4. Generate mint keypair
-    const mintKeypair = Keypair.generate();
-    const mint = mintKeypair.publicKey;
-    console.log(`Generated mint address: ${mint.toString()}`);
+    // 4. Generate mint keypair and check for collisions
+    let mintKeypair: Keypair = Keypair.generate();
+    let mint: PublicKey = mintKeypair.publicKey;
+    let maxMintAttempts = 10; // Prevent infinite loop
+    
+    for (let mintAttempt = 0; mintAttempt < maxMintAttempts; mintAttempt++) {
+      if (mintAttempt > 0) {
+        // Generate new keypair for retry attempts
+        mintKeypair = Keypair.generate();
+        mint = mintKeypair.publicKey;
+      }
+      
+      // Check if this mint address is already in use
+      try {
+        const accountInfo = await connection.getAccountInfo(mint);
+        if (accountInfo === null) {
+          // Address is available, break out of loop
+          console.log(`Generated unique mint address: ${mint.toString()}`);
+          break;
+        } else {
+          console.log(`Mint address ${mint.toString()} already exists, generating new one...`);
+          if (mintAttempt === maxMintAttempts - 1) {
+            throw new Error('Unable to generate unique mint address after multiple attempts');
+          }
+          continue;
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('Unable to generate unique mint')) {
+          throw error;
+        }
+        // If we can't check account info, assume it's available
+        console.log(`Generated mint address (unchecked): ${mint.toString()}`);
+        break;
+      }
+    }
     
     // 5. Calculate Associated Token Address manually
     const seeds = [
@@ -126,7 +157,7 @@ export async function createSolanaToken(
       TOKEN_PROGRAM_ID.toBytes(),
       mint.toBytes(),
     ];
-    const [associatedTokenAddress] = await PublicKey.findProgramAddress(seeds, ASSOCIATED_TOKEN_PROGRAM_ID);
+    let [associatedTokenAddress] = await PublicKey.findProgramAddress(seeds, ASSOCIATED_TOKEN_PROGRAM_ID);
     console.log(`Associated token address: ${associatedTokenAddress.toString()}`);
     
     // 6. Calculate mint account rent
@@ -254,10 +285,29 @@ export async function createSolanaToken(
       } catch (error: any) {
         console.error(`Attempt ${attempt + 1} failed:`, error);
         
-        // Check if it's a duplicate transaction error
-        if (error.message?.includes('already been processed')) {
+        // Check if it's a duplicate transaction error or account collision
+        if (error.message?.includes('already been processed') || 
+            error.message?.includes('already in use')) {
           if (attempt < maxRetries - 1) {
-            console.log('Duplicate transaction detected, retrying with new blockhash...');
+            if (error.message?.includes('already in use')) {
+              console.log('Account collision detected, regenerating mint keypair...');
+              // Generate new mint keypair for account collision
+              mintKeypair = Keypair.generate();
+              mint = mintKeypair.publicKey;
+              console.log(`New mint address: ${mint.toString()}`);
+              
+              // Recalculate associated token address with new mint
+              const newSeeds = [
+                payer.toBytes(),
+                TOKEN_PROGRAM_ID.toBytes(),
+                mint.toBytes(),
+              ];
+              const [newAssociatedTokenAddress] = await PublicKey.findProgramAddress(newSeeds, ASSOCIATED_TOKEN_PROGRAM_ID);
+              associatedTokenAddress = newAssociatedTokenAddress;
+              console.log(`New associated token address: ${associatedTokenAddress.toString()}`);
+            } else {
+              console.log('Duplicate transaction detected, retrying with new blockhash...');
+            }
             await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
             continue;
           }
