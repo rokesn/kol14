@@ -4,6 +4,7 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+.local
 .clinerules/byterover-rules.md
 .kilocode/rules/byterover-rules.md
 .roo/rules/byterover-rules.md
