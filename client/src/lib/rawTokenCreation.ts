@@ -36,6 +36,7 @@ export interface TokenResult {
 // SPL Token Program ID
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
 
 // Helper to create raw instructions without buffer dependencies
 function createRawInstruction(
@@ -133,103 +134,158 @@ export async function createSolanaToken(
     const mintRent = await connection.getMinimumBalanceForRentExemption(mintAccountSpace);
     console.log(`Mint rent: ${mintRent / LAMPORTS_PER_SOL} SOL`);
     
-    // 7. Build the transaction with raw instructions
-    const transaction = new Transaction();
+    // 7. Build the transaction with retry logic and unique elements
+    let signature: string | undefined;
+    const maxRetries = 3;
     
-    // Create mint account
-    transaction.add(
-      SystemProgram.createAccount({
-        fromPubkey: payer,
-        newAccountPubkey: mint,
-        space: mintAccountSpace,
-        lamports: mintRent,
-        programId: TOKEN_PROGRAM_ID,
-      })
-    );
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      console.log(`Transaction attempt ${attempt + 1}/${maxRetries}`);
+      
+      try {
+        const transaction = new Transaction();
+        
+        // Add unique memo instruction with timestamp to prevent duplicate transactions
+        const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        transaction.add(createRawInstruction(
+          MEMO_PROGRAM_ID,
+          [],
+          Buffer.from(`Token creation: ${uniqueId}`, 'utf-8')
+        ));
+        
+        // Create mint account
+        transaction.add(
+          SystemProgram.createAccount({
+            fromPubkey: payer,
+            newAccountPubkey: mint,
+            space: mintAccountSpace,
+            lamports: mintRent,
+            programId: TOKEN_PROGRAM_ID,
+          })
+        );
+        
+        // Initialize mint instruction (raw)
+        const initMintData = new Uint8Array(67);
+        initMintData[0] = 0; // InitializeMint instruction
+        initMintData[1] = tokenData.decimals; // decimals
+        // Mint authority (32 bytes)
+        payer.toBytes().forEach((byte, index) => {
+          initMintData[2 + index] = byte;
+        });
+        initMintData[34] = 1; // COption::Some for freeze authority
+        // Freeze authority (32 bytes)
+        payer.toBytes().forEach((byte, index) => {
+          initMintData[35 + index] = byte;
+        });
+        
+        transaction.add(createRawInstruction(
+          TOKEN_PROGRAM_ID,
+          [
+            { pubkey: mint, isSigner: false, isWritable: true },
+            { pubkey: new PublicKey('SysvarRent111111111111111111111111111111111'), isSigner: false, isWritable: false },
+          ],
+          initMintData
+        ));
+        
+        // Create Associated Token Account instruction (raw)
+        transaction.add(createRawInstruction(
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+          [
+            { pubkey: payer, isSigner: true, isWritable: true }, // payer
+            { pubkey: associatedTokenAddress, isSigner: false, isWritable: true }, // associated token account
+            { pubkey: payer, isSigner: false, isWritable: false }, // owner
+            { pubkey: mint, isSigner: false, isWritable: false }, // mint
+            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system program
+            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token program
+            { pubkey: new PublicKey('SysvarRent111111111111111111111111111111111'), isSigner: false, isWritable: false }, // rent sysvar
+          ],
+          new Uint8Array(0) // no data needed for create ATA
+        ));
+        
+        // Mint tokens instruction (raw)
+        const mintAmount = BigInt(tokenData.totalSupply) * BigInt(10 ** tokenData.decimals);
+        const mintToData = new Uint8Array(9);
+        mintToData[0] = 7; // MintTo instruction
+        const amountBytes = bigintToLEBytes(mintAmount, 8);
+        amountBytes.forEach((byte, index) => {
+          mintToData[1 + index] = byte;
+        });
+        
+        transaction.add(createRawInstruction(
+          TOKEN_PROGRAM_ID,
+          [
+            { pubkey: mint, isSigner: false, isWritable: true }, // mint
+            { pubkey: associatedTokenAddress, isSigner: false, isWritable: true }, // destination
+            { pubkey: payer, isSigner: true, isWritable: false }, // mint authority
+          ],
+          mintToData
+        ));
+        
+        // 8. Get fresh blockhash for each attempt
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = payer;
+        
+        // 9. Partially sign with mint keypair
+        transaction.partialSign(mintKeypair);
+        
+        // 10. Request wallet to sign the transaction
+        console.log('Requesting wallet signature...');
+        const signedTransaction = await walletAdapter.signTransaction(transaction);
+        
+        // 11. Send and confirm transaction
+        console.log('Sending transaction...');
+        signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed'
+        });
+        
+        console.log(`Transaction sent: ${signature}`);
+        console.log('Confirming transaction...');
+        
+        await connection.confirmTransaction({
+          signature,
+          blockhash,
+          lastValidBlockHeight,
+        }, 'confirmed');
+        
+        console.log('Transaction confirmed!');
+        break; // Success, exit retry loop
+        
+      } catch (error: any) {
+        console.error(`Attempt ${attempt + 1} failed:`, error);
+        
+        // Check if it's a duplicate transaction error
+        if (error.message?.includes('already been processed')) {
+          if (attempt < maxRetries - 1) {
+            console.log('Duplicate transaction detected, retrying with new blockhash...');
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
+            continue;
+          }
+        }
+        
+        // Check if transaction was actually successful despite error
+        if (signature) {
+          try {
+            const txInfo = await connection.getTransaction(signature, { commitment: 'confirmed' });
+            if (txInfo) {
+              console.log('Transaction was successful despite error');
+              break; // Success, exit retry loop
+            }
+          } catch (confirmError) {
+            // Transaction didn't succeed, continue with retry logic
+          }
+        }
+        
+        // If it's the last attempt or not a retryable error, throw
+        if (attempt === maxRetries - 1 || !error.message?.includes('already been processed')) {
+          throw error;
+        }
+      }
+    }
     
-    // Initialize mint instruction (raw)
-    const initMintData = new Uint8Array(67);
-    initMintData[0] = 0; // InitializeMint instruction
-    initMintData[1] = tokenData.decimals; // decimals
-    // Mint authority (32 bytes)
-    payer.toBytes().forEach((byte, index) => {
-      initMintData[2 + index] = byte;
-    });
-    initMintData[34] = 1; // COption::Some for freeze authority
-    // Freeze authority (32 bytes)
-    payer.toBytes().forEach((byte, index) => {
-      initMintData[35 + index] = byte;
-    });
-    
-    transaction.add(createRawInstruction(
-      TOKEN_PROGRAM_ID,
-      [
-        { pubkey: mint, isSigner: false, isWritable: true },
-        { pubkey: new PublicKey('SysvarRent111111111111111111111111111111111'), isSigner: false, isWritable: false },
-      ],
-      initMintData
-    ));
-    
-    // Create Associated Token Account instruction (raw)
-    transaction.add(createRawInstruction(
-      ASSOCIATED_TOKEN_PROGRAM_ID,
-      [
-        { pubkey: payer, isSigner: true, isWritable: true }, // payer
-        { pubkey: associatedTokenAddress, isSigner: false, isWritable: true }, // associated token account
-        { pubkey: payer, isSigner: false, isWritable: false }, // owner
-        { pubkey: mint, isSigner: false, isWritable: false }, // mint
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system program
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token program
-        { pubkey: new PublicKey('SysvarRent111111111111111111111111111111111'), isSigner: false, isWritable: false }, // rent sysvar
-      ],
-      new Uint8Array(0) // no data needed for create ATA
-    ));
-    
-    // Mint tokens instruction (raw)
-    const mintAmount = BigInt(tokenData.totalSupply) * BigInt(10 ** tokenData.decimals);
-    const mintToData = new Uint8Array(9);
-    mintToData[0] = 7; // MintTo instruction
-    const amountBytes = bigintToLEBytes(mintAmount, 8);
-    amountBytes.forEach((byte, index) => {
-      mintToData[1 + index] = byte;
-    });
-    
-    transaction.add(createRawInstruction(
-      TOKEN_PROGRAM_ID,
-      [
-        { pubkey: mint, isSigner: false, isWritable: true }, // mint
-        { pubkey: associatedTokenAddress, isSigner: false, isWritable: true }, // destination
-        { pubkey: payer, isSigner: true, isWritable: false }, // mint authority
-      ],
-      mintToData
-    ));
-    
-    // 8. Set transaction properties
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = payer;
-    
-    // 9. Partially sign with mint keypair
-    transaction.partialSign(mintKeypair);
-    
-    // 10. Request wallet to sign the transaction
-    console.log('Requesting wallet signature...');
-    const signedTransaction = await walletAdapter.signTransaction(transaction);
-    
-    // 11. Send and confirm transaction
-    console.log('Sending transaction...');
-    const signature = await connection.sendRawTransaction(signedTransaction.serialize());
-    
-    console.log(`Transaction sent: ${signature}`);
-    console.log('Confirming transaction...');
-    
-    await connection.confirmTransaction({
-      signature,
-      blockhash,
-      lastValidBlockHeight,
-    });
-    
-    console.log('Transaction confirmed!');
+    if (!signature) {
+      throw new Error('Failed to create token after multiple attempts');
+    }
     
     // 12. Build explorer URL
     const clusterParam = network === 'devnet' ? '?cluster=devnet' : '';
